@@ -1,0 +1,109 @@
+name: Build and release Garry's Mod DLLs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.variant }} / win${{ matrix.bits }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: Win32
+            bits: '32'
+            variant: with_logger
+            enable_logger: 'ON'
+          - arch: x64
+            bits: '64'
+            variant: with_logger
+            enable_logger: 'ON'
+          - arch: Win32
+            bits: '32'
+            variant: without_logger
+            enable_logger: 'OFF'
+          - arch: x64
+            bits: '64'
+            variant: without_logger
+            enable_logger: 'OFF'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure (${{ matrix.variant }})
+        run: >-
+          cmake -S . -B build -A ${{ matrix.arch }}
+          -DMENUHTTP_WITH_LOGGER=${{ matrix.enable_logger }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Prepare uniquely named DLL
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "build/Release/menuhttp_inject_win${{ matrix.bits }}.dll" "dist/menuhttp_${{ matrix.variant }}_win${{ matrix.bits }}.dll"
+
+      - name: Upload DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: menuhttp-${{ matrix.variant }}-win${{ matrix.bits }}
+          path: dist/*.dll
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: GitHub Release (${{ github.sha }})
+    needs: build
+    # Pull requests build but never publish. Manual runs publish only from main.
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: menuhttp-release-${{ github.sha }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Download all four DLLs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: menuhttp-*
+          merge-multiple: true
+          path: dist
+
+      - name: Verify files and write SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          for variant in with_logger without_logger; do
+            for bits in 32 64; do
+              test -s "dist/menuhttp_${variant}_win${bits}.dll"
+            done
+          done
+          (cd dist && sha256sum menuhttp_*.dll > SHA256SUMS)
+
+      - name: Publish release named by commit SHA
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="commit-${GITHUB_SHA}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists. Nothing to publish."
+            exit 0
+          fi
+          gh release create "$tag" dist/*.dll dist/SHA256SUMS \
+            --target "$GITHUB_SHA" \
+            --title "$GITHUB_SHA" \
+            --notes "Automatic build for commit $GITHUB_SHA. Includes Win32/Win64 variants with and without logging."
