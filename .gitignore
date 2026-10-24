@@ -1,4 +1,5 @@
 README.md
 examples/*.lua
 *.ps1
-*.txt
+structure.txt
+*.7z
