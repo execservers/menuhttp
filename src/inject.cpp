@@ -3,6 +3,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
+#include <shellapi.h>
 
 #include <GarrysMod/Lua/LuaInterface.h>
 #include <GarrysMod/Lua/LuaShared.h>
@@ -19,9 +20,32 @@ namespace {
 std::atomic<HHOOK> g_hook{nullptr};
 std::atomic<bool> g_ready{false};
 std::atomic<bool> g_failed{false};
+std::atomic<bool> g_disabled{false};
 std::atomic<const char*> g_stage{"bootstrap"};
 
 using Factory = void* (__cdecl*)(const char*, int*);
+
+// Match Source-style -flags as separate command-line arguments. This DLL is
+// injected independently of the engine and must not rely on tier0's ABI.
+bool DisabledByLaunchOptions() {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) {
+        MenuHTTP_Log("WARNING: cannot parse launch options (Win32 error=%lu)", GetLastError());
+        return false;
+    }
+
+    bool disabled = false;
+    for (int i = 1; i < argc; ++i) {
+        if (lstrcmpiW(argv[i], L"-disablehttp") == 0) {
+            MenuHTTP_Log("disabled by launch option %ls; no hooks or Lua globals installed", argv[i]);
+            disabled = true;
+            break;
+        }
+    }
+    LocalFree(argv);
+    return disabled;
+}
 
 // Record the exact native call that faulted, then permanently stop probing.
 // This is a last-resort crash diagnostic, not an ABI compatibility workaround.
@@ -145,6 +169,13 @@ DWORD WINAPI Bootstrap(void*) {
     MenuHTTP_Log("DLL loaded; pid=%lu arch=%s; no Lua require",
                  GetCurrentProcessId(), sizeof(void*) == 8 ? "x64" : "x86");
 
+    // Respect GMod's built-in -disablehttp before pinning the DLL,
+    // touching Lua or installing the message hook.
+    if (DisabledByLaunchOptions()) {
+        g_disabled.store(true, std::memory_order_release);
+        return 0;
+    }
+
     // Keep mapped for all Lua C closures and workers until process termination.
     HMODULE pinned = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
@@ -212,8 +243,9 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     return TRUE;
 }
 
-// -1 = disabled after fault, 0 = initializing, 1 = registered.
+// -2 = disabled by launch option, -1 = fault, 0 = initializing, 1 = registered.
 extern "C" __declspec(dllexport) int __cdecl MenuHTTP_Status() {
+    if (g_disabled.load(std::memory_order_acquire)) return -2;
     if (g_failed.load(std::memory_order_acquire)) return -1;
     return g_ready.load(std::memory_order_acquire) ? 1 : 0;
 }

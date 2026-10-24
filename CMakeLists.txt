@@ -43,6 +43,6 @@ target_compile_definitions(menuhttp_inject PRIVATE
   NOMINMAX
   MENUHTTP_WITH_LOGGER=$<BOOL:${MENUHTTP_WITH_LOGGER}>
 )
-target_link_libraries(menuhttp_inject PRIVATE winhttp user32)
+target_link_libraries(menuhttp_inject PRIVATE winhttp user32 shell32)
 set_target_properties(menuhttp_inject PROPERTIES PREFIX "" OUTPUT_NAME "menuhttp_inject_win${GMOD_BITNESS}")
 target_compile_options(menuhttp_inject PRIVATE /W4 /EHsc /permissive-)
